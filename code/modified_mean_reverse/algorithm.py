@@ -12,16 +12,17 @@ I also commented out two other filters that I looked at:
 import numpy as np
 import pandas as pd
 from zipline.pipeline import Pipeline
+from zipline.pipeline.data import USEquityPricing
 from zipline.pipeline import CustomFactor
 from zipline.api import (attach_pipeline, pipeline_output, set_benchmark, schedule_function, date_rules, time_rules,
-                         set_commission, set_slippage)
+                         set_commission, set_slippage, symbol, order_target_percent, record)
 from zipline.finance import (commission.PerShare, slippage.FixedSlippage)
 # from zipline.pipeline.factors import SimpleMovingAverage, AverageDollarVolume
 
 
 def initialize(context):
     # Set benchmark to short-term Treasury note ETF (SHY) since strategy is dollar neutral
-    set_benchmark(sid(23911))
+    set_benchmark(symbol('AAPL'))
 
     # Schedule our rebalance function to run at the end of each day.
     # Modified the timing to 5 mins earlier than the market close to reduce the fail to book warnings
@@ -62,20 +63,20 @@ class Volatility(CustomFactor):
         out[:] = daily_returns.std(axis=0)
 
 
-class Liquidity(CustomFactor):
-    inputs = [USEquityPricing.volume, morningstar.valuation.shares_outstanding]
-    window_length = 1
+# class Liquidity(CustomFactor):
+#     inputs = [USEquityPricing.volume, morningstar.valuation.shares_outstanding]
+#     window_length = 1
+#
+#     def compute(self, today, assets, out, volume, shares):
+#         out[:] = volume[-1] / shares[-1]
 
-    def compute(self, today, assets, out, volume, shares):
-        out[:] = volume[-1] / shares[-1]
 
-
-class Sector(CustomFactor):
-    inputs = [morningstar.asset_classification.morningstar_sector_code]
-    window_length = 1
-
-    def compute(self, today, assets, out, sector):
-        out[:] = sector[-1]
+# class Sector(CustomFactor):
+#     inputs = [morningstar.asset_classification.morningstar_sector_code]
+#     window_length = 1
+#
+#     def compute(self, today, assets, out, sector):
+#         out[:] = sector[-1]
 
 
 def make_pipeline():
@@ -88,20 +89,18 @@ def make_pipeline():
     # Volatility filter (I made it sector neutral to replicate what UBS did).  Uncomment and
     # change the percentile bounds as you would like before adding to 'universe'
     vol = Volatility(mask=Q500US())
-    sector = morningstar.asset_classification.morningstar_sector_code.latest
-    vol = vol.zscore(groupby=sector)
+    # sector = morningstar.asset_classification.morningstar_sector_code.latest
+    # vol = vol.zscore(groupby=sector)
     volatility_filter = vol.percentile_between(0, 75)
 
     # Liquidity filter (Uncomment and change the percentile bounds as you would like before
     # adding to 'universe'
-    liquidity = Liquidity(mask=Q500US())
+    # liquidity = Liquidity(mask=Q500US())
     # I included NaN in liquidity filter because of the large amount of missing data for shares out
-    liquidity_filter = liquidity.percentile_between(0, 75) | liquidity.isnan()
+    # liquidity_filter = liquidity.percentile_between(0, 75) | liquidity.isnan()
 
     universe = (
-        Q500US()
-        & (pricing > 5)
-        & liquidity_filter
+        (pricing > 5)
         & volatility_filter
     )
 
