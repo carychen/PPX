@@ -16,9 +16,8 @@ from zipline.pipeline.data import USEquityPricing
 from zipline.pipeline import CustomFactor
 from zipline.api import (attach_pipeline, pipeline_output, set_benchmark, schedule_function, date_rules, time_rules,
                          set_commission, set_slippage, symbol, order_target_percent, record)
-from zipline.finance import (commission.PerShare, slippage.FixedSlippage)
 # from zipline.pipeline.factors import SimpleMovingAverage, AverageDollarVolume
-
+from zipline.finance import commission, slippage
 
 def initialize(context):
     # Set benchmark to short-term Treasury note ETF (SHY) since strategy is dollar neutral
@@ -31,12 +30,12 @@ def initialize(context):
     schedule_function(my_rebalance, date_rules.every_day(), time_rules.market_open(minutes=5))
 
     # Record variables at the end of each day.
-    schedule_function(my_record_vars, date_rules.every_day(), time_rules.market_close())
+    # schedule_function(my_record_vars, date_rules.every_day(), time_rules.market_close())
 
     # Get intraday prices today before the close if you are not skipping the most recent data
     # schedule_function(get_prices,date_rules.every_day(), time_rules.market_close(minutes=10))
     # Try to get the price data when the market is opening -- HY
-    schedule_function(get_prices, date_rules.every_day(), time_rules.market_open())
+    # schedule_function(get_prices, date_rules.every_day(), time_rules.market_open(minutes=1))
 
     # Set commissions and slippage to 0 to determine pure alpha
     set_commission(commission.PerShare(cost=0, min_trade_cost=0))
@@ -57,9 +56,9 @@ class Volatility(CustomFactor):
     inputs = [USEquityPricing.close]
     window_length = 130  # If we consider 5 days a week, and we have totally 52 weeks, 6 months data is around 130
 
-    def compute(self, today, assets, out, close):
+    def compute(self, today, assets, out, data):
         # I compute 6-month volatility, starting before the five-day mean reversion period
-        daily_returns = np.log(close[1: -6]) - np.log(close[0: -7])
+        daily_returns = np.log(data[1: -6]) - np.log(data[0: -7])
         out[:] = daily_returns.std(axis=0)
 
 
@@ -88,7 +87,7 @@ def make_pipeline():
 
     # Volatility filter (I made it sector neutral to replicate what UBS did).  Uncomment and
     # change the percentile bounds as you would like before adding to 'universe'
-    vol = Volatility(mask=Q500US())
+    vol = Volatility()
     # sector = morningstar.asset_classification.morningstar_sector_code.latest
     # vol = vol.zscore(groupby=sector)
     volatility_filter = vol.percentile_between(0, 75)
@@ -151,6 +150,35 @@ def my_rebalance(context, data):
     """
     Universe500 = context.output.index.tolist()
 
+    # ---------------------------------------- Move from get_price function---------------------------------------------
+    prices = data.history(Universe500, 'price', 6, '1d')
+    daily_rets = np.log(prices / prices.shift(1))
+
+    rets = (prices.iloc[-2] - prices.iloc[0]) / prices.iloc[0]
+    # I used data.history instead of Pipeline to get historical prices so you can have the
+    # option of using the intraday price just before the close to get the most recent return.
+    # In my post, I argue that you generally get better results when you skip that return.
+    # If you don't want to skip the most recent return, however, use .iloc[-1] instead of .iloc[-2]:
+    # rets=(prices.iloc[-1] - prices.iloc[0]) / prices.iloc[0]
+
+    stdevs = daily_rets.std(axis=0)
+
+    rets_df = pd.DataFrame(rets, columns=['five_day_ret'])
+    stdevs_df = pd.DataFrame(stdevs, columns=['stdev_ret'])
+
+    # Should have no difference between outer join and inner join here, because they have same stocks in two dataframe
+    context.output = context.output.join(rets_df, how='outer')
+    context.output = context.output.join(stdevs_df, how='outer')
+
+    context.output['ret_quantile'] = pd.qcut(context.output['five_day_ret'], context.nq, labels=False) + 1
+    context.output['stdev_quantile'] = pd.qcut(context.output['stdev_ret'], 3, labels=False) + 1
+
+    context.longs = context.output[(context.output['ret_quantile'] == 1) &
+                                   (context.output['stdev_quantile'] < context.nq_vol)].index.tolist()
+    context.shorts = context.output[(context.output['ret_quantile'] == context.nq) &
+                                    (context.output['stdev_quantile'] < context.nq_vol)].index.tolist()
+    # ------------------------------------------------------------------------------------------------------------------
+
     existing_longs = 0
     existing_shorts = 0
     for security in context.portfolio.positions:
@@ -180,18 +208,18 @@ def my_rebalance(context, data):
             order_target_percent(security, -.5 / (len(context.shorts) + existing_shorts))
 
 
-def my_record_vars(context, data):
-    """
-    Record variables at the end of each day.
-    """
-    longs = shorts = 0
-    for position in context.portfolio.positions.itervalues():
-        if position.amount > 0:
-            longs += 1
-        elif position.amount < 0:
-            shorts += 1
-    # Record our variables.
-    record(leverage=context.account.leverage, long_count=longs, short_count=shorts)
-
-    log.info("Today's shorts: " + ", ".join([short_.symbol for short_ in context.shorts]))
-    log.info("Today's longs: " + ", ".join([long_.symbol for long_ in context.longs]))
+# def my_record_vars(context, data):
+#     """
+#     Record variables at the end of each day.
+#     """
+#     longs = shorts = 0
+#     for position in context.portfolio.positions.itervalues():
+#         if position.amount > 0:
+#             longs += 1
+#         elif position.amount < 0:
+#             shorts += 1
+#     # Record our variables.
+#     record(leverage=context.account.leverage, long_count=longs, short_count=shorts)
+#
+#     log.info("Today's shorts: " + ", ".join([short_.symbol for short_ in context.shorts]))
+#     log.info("Today's longs: " + ", ".join([long_.symbol for long_ in context.longs]))
